@@ -43,10 +43,14 @@ Contributors:
 #  include <sys/socket.h>
 #endif
 #include <time.h>
+#include <pthread.h>
 
 #ifdef WITH_WEBSOCKETS
 #  include <libwebsockets.h>
 #endif
+
+#define NR_OF_THREADS 8
+#define WIEBETHREADS 1
 
 #include "mosquitto_broker_internal.h"
 #include "memory_mosq.h"
@@ -109,50 +113,48 @@ void lws__sul_callback(struct lws_sorted_usec_list *l)
 static struct lws_sorted_usec_list sul;
 #endif
 
+struct read_thread_loop_args_t
+{
+	pthread_t thread_nr;
+	pthread_t thread_id;
+	struct mosquitto_db *db;
+	int epollfd;
+};
+
+struct accept_loop_args_t
+{
+	pthread_t thread_id;
+	struct read_thread_loop_args_t *read_threads;
+	struct mosquitto_db *db;
+	mosq_sock_t *listensock;
+	int listensock_count;
+};
+
+void *read_loop_for_thread(void *threadarg);
+void *accept_loop(void *threadarg);
+
 int mosquitto_main_loop(struct mosquitto_db *db, mosq_sock_t *listensock, int listensock_count)
 {
-#ifdef WITH_SYS_TREE
-	time_t start_time = mosquitto_time();
-#endif
-#ifdef WITH_PERSISTENCE
-	time_t last_backup = mosquitto_time();
-#endif
-	time_t now = 0;
-	int time_count;
-	int fdcount;
-	struct mosquitto *context, *ctxt_tmp;
-#ifndef WIN32
-	sigset_t sigblock, origsig;
-#endif
-	int i;
+	struct read_thread_loop_args_t read_threads[NR_OF_THREADS];
+
+	//struct mosquitto *context, *ctxt_tmp;
+
+	//int i;
 #ifdef WITH_EPOLL
-	int j;
-	struct epoll_event ev, events[MAX_EVENTS];
+	//struct epoll_event ev;
 #else
 	struct pollfd *pollfds = NULL;
 	int pollfd_index;
 	int pollfd_max;
 #endif
 #ifdef WITH_BRIDGE
-	int rc;
-	int err;
-	socklen_t len;
+	//int rc;
 #endif
-	time_t expiration_check_time = 0;
-	char *id;
 
+	int rc;
 
 #if defined(WITH_WEBSOCKETS) && LWS_LIBRARY_VERSION_NUMBER == 3002000
 	memset(&sul, 0, sizeof(struct lws_sorted_usec_list));
-#endif
-
-#ifndef WIN32
-	sigemptyset(&sigblock);
-	sigaddset(&sigblock, SIGINT);
-	sigaddset(&sigblock, SIGTERM);
-	sigaddset(&sigblock, SIGUSR1);
-	sigaddset(&sigblock, SIGUSR2);
-	sigaddset(&sigblock, SIGHUP);
 #endif
 
 #ifndef WITH_EPOLL
@@ -169,29 +171,11 @@ int mosquitto_main_loop(struct mosquitto_db *db, mosq_sock_t *listensock, int li
 	}
 #endif
 
-	if(db->config->persistent_client_expiration > 0){
-		expiration_check_time = time(NULL) + 3600;
-	}
+
 
 #ifdef WITH_EPOLL
-	db->epollfd = 0;
-	if ((db->epollfd = epoll_create(MAX_EVENTS)) == -1) {
-		log__printf(NULL, MOSQ_LOG_ERR, "Error in epoll creating: %s", strerror(errno));
-		return MOSQ_ERR_UNKNOWN;
-	}
-	memset(&ev, 0, sizeof(struct epoll_event));
-	memset(&events, 0, sizeof(struct epoll_event)*MAX_EVENTS);
-	for(i=0; i<listensock_count; i++){
-		ev.data.fd = listensock[i];
-		ev.events = EPOLLIN;
-		if (epoll_ctl(db->epollfd, EPOLL_CTL_ADD, listensock[i], &ev) == -1) {
-			log__printf(NULL, MOSQ_LOG_ERR, "Error in epoll initial registering: %s", strerror(errno));
-			(void)close(db->epollfd);
-			db->epollfd = 0;
-			return MOSQ_ERR_UNKNOWN;
-		}
-	}
-#ifdef WITH_BRIDGE
+
+#ifdef WITH_BRIDGEDISABLED // TODO: what do here? Assign to the first thread's epollfd?
 	HASH_ITER(hh_sock, db->contexts_by_sock, context, ctxt_tmp){
 		if(context->bridge){
 			ev.data.fd = context->sock;
@@ -208,12 +192,231 @@ int mosquitto_main_loop(struct mosquitto_db *db, mosq_sock_t *listensock, int li
 #endif
 #endif
 
+	pthread_attr_t pt_attr;
+	pthread_attr_init(&pt_attr);
+	pthread_attr_setdetachstate(&pt_attr, PTHREAD_CREATE_JOINABLE);
+
+	pthread_mutex_init(&db->mosquitto__subhier_mutex, NULL);
+	pthread_mutex_init(&db->mosquitto__socks_mutex, NULL);
+	pthread_mutex_init(&db->msg_store_mutex, NULL);
+
+	for (pthread_t t = 0; t < NR_OF_THREADS; t++)
+	{
+		struct read_thread_loop_args_t *args = &read_threads[t];
+		args->thread_nr = t;
+		args->db = db;
+
+		int rc = pthread_create(&args->thread_id, &pt_attr, read_loop_for_thread, (void*)args);
+		if (rc)
+		{
+			log__printf(NULL, MOSQ_LOG_ERR, "Error in creating thread. Code: %s", strerror(errno));
+		}
+		else
+		{
+			log__printf(NULL, MOSQ_LOG_INFO, "Thread %ld created", t);
+		}
+	}
+
+	struct accept_loop_args_t accept_loop_args;
+	accept_loop_args.db = db;
+	accept_loop_args.listensock = listensock;
+	accept_loop_args.listensock_count = listensock_count;
+	accept_loop_args.read_threads = read_threads;
+	if (pthread_create(&accept_loop_args.thread_id, &pt_attr, accept_loop, (void*)&accept_loop_args))
+	{
+		log__printf(NULL, MOSQ_LOG_ERR, "Error in creating socket accepting thread. Code: %s", strerror(errno));
+	}
+
+	void *status;
+	if ((rc = pthread_join(accept_loop_args.thread_id, &status)) != 0)
+	{
+		printf("ERROR: thread join rc = %d\n", rc);
+	}
+	else
+	{
+		printf("Thread %ld joined. Status: %ld\n", accept_loop_args.thread_id, (long) status);
+	}
+
+	for (pthread_t t = 0; t < NR_OF_THREADS; t++)
+	{
+		void *status;
+		rc = pthread_join(read_threads[t].thread_id, &status);
+		if (rc)
+		{
+			printf("ERROR: thread join rc = %d\n", rc);
+		}
+		else
+		{
+			printf("Thread %ld joined. Status: %ld\n", read_threads[t].thread_id, (long) status);
+		}
+
+	}
+
+	pthread_mutex_destroy(&db->mosquitto__subhier_mutex);
+	pthread_mutex_destroy(&db->mosquitto__socks_mutex);
+	pthread_mutex_destroy(&db->msg_store_mutex);
+
+#ifdef WITH_EPOLL
+	//(void) close(db->epollfd);
+	//db->epollfd = 0;
+#else
+	mosquitto__free(pollfds);
+#endif
+	return MOSQ_ERR_SUCCESS;
+}
+
+// Accepts connections from the listensockets ands gives them to a thread. We're using a separate thread for accepting because of epoll difficulties.
+// This way, we don't have to fiddle with EPOLLET and EPOLLONESHOT, and we have no thundering herd.
+void *accept_loop(void *threadarg)
+{
+	struct accept_loop_args_t *loop_args = (struct accept_loop_args_t*)threadarg;
+	struct mosquitto_db *db = loop_args->db;
+	mosq_sock_t *listensock = loop_args->listensock;
+	int listensock_count = loop_args->listensock_count;
+
+	struct mosquitto *context;
+	int epollfd = 0;
+	struct epoll_event ev, events[MAX_EVENTS];
+	uint next_thread_idx = 0;
+
+	if ((epollfd = epoll_create(MAX_EVENTS)) == -1) {
+		log__printf(NULL, MOSQ_LOG_ERR, "Error in epoll creating: %s", strerror(errno));
+		pthread_exit((void*) MOSQ_ERR_UNKNOWN);
+	}
+	memset(&ev, 0, sizeof(struct epoll_event));
+	for(int i=0; i<listensock_count; i++){
+		ev.data.fd = listensock[i];
+		ev.events = EPOLLIN;
+		if (epoll_ctl(epollfd, EPOLL_CTL_ADD, listensock[i], &ev) == -1) {
+			log__printf(NULL, MOSQ_LOG_ERR, "Error in epoll initial registering: %s", strerror(errno));
+			(void)close(epollfd);
+			epollfd = 0;
+			pthread_exit((void*) MOSQ_ERR_UNKNOWN);
+		}
+	}
+
+	while(run)
+	{
+		int fdcount = epoll_wait(epollfd, events, MAX_EVENTS, 100);
+
+		switch(fdcount){
+		case -1:
+			if(errno != EINTR){
+				log__printf(NULL, MOSQ_LOG_ERR, "Error in epoll waiting for accept: %s.", strerror(errno));
+			}
+			break;
+		case 0:
+			break;
+		default:
+
+			for(int i=0; i<fdcount; i++){
+				for(int j=0; j<listensock_count; j++){
+					if (events[i].data.fd == listensock[j]) {
+						if (events[i].events & (EPOLLIN | EPOLLPRI)){
+							while((ev.data.fd = net__socket_accept(db, listensock[j])) != -1){
+								uint next_thread = next_thread_idx++ % NR_OF_THREADS;
+								int epollfd_of_thread = loop_args->read_threads[next_thread].epollfd;
+
+								// This will register the accepted socket to the epoll instance of this thread only
+								ev.events = EPOLLIN;
+								if (epoll_ctl(epollfd_of_thread, EPOLL_CTL_ADD, ev.data.fd, &ev) == -1) {
+									log__printf(NULL, MOSQ_LOG_ERR, "Error in epoll accepting: %s", strerror(errno));
+								}
+
+								context = NULL;
+								HASH_FIND(hh_sock, db->contexts_by_sock, &(ev.data.fd), sizeof(mosq_sock_t), context);
+								if(!context) {
+									log__printf(NULL, MOSQ_LOG_ERR, "Error in epoll accepting: no context");
+								}
+								context->events = EPOLLIN;
+								context->epollfd = epollfd_of_thread;
+								log__printf(NULL, MOSQ_LOG_INFO, "ACCEPT: Accepted connection with fd %d, giving it to thread %d", ev.data.fd, next_thread);
+							}
+						}
+						break;
+					}
+				}
+			}
+		}
+
+	}
+
+#ifdef WITH_EPOLL
+	(void) close(epollfd);
+	epollfd = 0;
+#endif
+
+	pthread_exit((void*)0);
+}
+
+void *read_loop_for_thread(void *threadarg)
+{
+	struct read_thread_loop_args_t *loop_args = (struct read_thread_loop_args_t*)threadarg;
+	struct mosquitto_db *db = loop_args->db;
+
+	struct mosquitto *context, *ctxt_tmp;
+#ifndef WIN32
+	sigset_t sigblock, origsig;
+#endif
+	int i;
+#ifdef WITH_EPOLL
+	struct epoll_event ev, events[MAX_EVENTS];
+#endif
+
+#ifdef WITH_BRIDGE
+	int rc;
+	int err;
+	socklen_t len;
+#endif
+
+#ifndef WIN32
+	sigemptyset(&sigblock);
+	sigaddset(&sigblock, SIGINT);
+	sigaddset(&sigblock, SIGTERM);
+	sigaddset(&sigblock, SIGUSR1);
+	sigaddset(&sigblock, SIGUSR2);
+	sigaddset(&sigblock, SIGHUP);
+#endif
+
+#ifdef WITH_SYS_TREE
+	time_t start_time = mosquitto_time(); // TODO: is mosquitto_time() thread safe? I think I saw in the client code it wasn't?
+#endif
+#ifdef WITH_PERSISTENCE
+	time_t last_backup = mosquitto_time();
+#endif
+
+	time_t now = 0;
+	int time_count;
+	int fdcount;
+
+	char *id;
+	time_t expiration_check_time = 0;
+
+	if(db->config->persistent_client_expiration > 0){
+		expiration_check_time = time(NULL) + 3600;
+	}
+
+#ifdef WITH_EPOLL
+	memset(&events, 0, sizeof(struct epoll_event)*MAX_EVENTS);
+
+	loop_args->epollfd = 0;
+	if ((loop_args->epollfd = epoll_create(MAX_EVENTS)) == -1) {
+		log__printf(NULL, MOSQ_LOG_ERR, "Error in epoll creating: %s", strerror(errno));
+		pthread_exit((void*) MOSQ_ERR_UNKNOWN);
+	}
+	memset(&ev, 0, sizeof(struct epoll_event));
+#endif
+
 	while(run){
 		context__free_disused(db);
 #ifdef WITH_SYS_TREE
 		if(db->config->sys_interval > 0){
 			sys_tree__update(db, db->config->sys_interval, start_time);
 		}
+#endif
+
+#ifdef WITH_EPOLL
+
 #endif
 
 #ifndef WITH_EPOLL
@@ -294,8 +497,8 @@ int mosquitto_main_loop(struct mosquitto_db *db, mosq_sock_t *listensock, int li
 							if(!(context->events & EPOLLOUT)) {
 								ev.data.fd = context->sock;
 								ev.events = EPOLLIN | EPOLLOUT;
-								if(epoll_ctl(db->epollfd, EPOLL_CTL_ADD, context->sock, &ev) == -1) {
-									if((errno != EEXIST)||(epoll_ctl(db->epollfd, EPOLL_CTL_MOD, context->sock, &ev) == -1)) {
+								if(epoll_ctl(loop_args->epollfd, EPOLL_CTL_ADD, context->sock, &ev) == -1) {
+									if((errno != EEXIST)||(epoll_ctl(loop_args->epollfd, EPOLL_CTL_MOD, context->sock, &ev) == -1)) {
 											log__printf(NULL, MOSQ_LOG_DEBUG, "Error in epoll re-registering to EPOLLOUT: %s", strerror(errno));
 									}
 								}
@@ -307,8 +510,8 @@ int mosquitto_main_loop(struct mosquitto_db *db, mosq_sock_t *listensock, int li
 							if(context->events & EPOLLOUT) {
 								ev.data.fd = context->sock;
 								ev.events = EPOLLIN;
-								if(epoll_ctl(db->epollfd, EPOLL_CTL_ADD, context->sock, &ev) == -1) {
-									if((errno != EEXIST)||(epoll_ctl(db->epollfd, EPOLL_CTL_MOD, context->sock, &ev) == -1)) {
+								if(epoll_ctl(loop_args->epollfd, EPOLL_CTL_ADD, context->sock, &ev) == -1) {
+									if((errno != EEXIST)||(epoll_ctl(loop_args->epollfd, EPOLL_CTL_MOD, context->sock, &ev) == -1)) {
 											log__printf(NULL, MOSQ_LOG_DEBUG, "Error in epoll re-registering to EPOLLIN: %s", strerror(errno));
 									}
 								}
@@ -376,8 +579,8 @@ int mosquitto_main_loop(struct mosquitto_db *db, mosq_sock_t *listensock, int li
 									if(context->current_out_packet){
 										ev.events |= EPOLLOUT;
 									}
-									if(epoll_ctl(db->epollfd, EPOLL_CTL_ADD, context->sock, &ev) == -1) {
-										if((errno != EEXIST)||(epoll_ctl(db->epollfd, EPOLL_CTL_MOD, context->sock, &ev) == -1)) {
+									if(epoll_ctl(loop_args->epollfd, EPOLL_CTL_ADD, context->sock, &ev) == -1) {
+										if((errno != EEXIST)||(epoll_ctl(loop_args->epollfd, EPOLL_CTL_MOD, context->sock, &ev) == -1)) {
 												log__printf(NULL, MOSQ_LOG_DEBUG, "Error in epoll re-registering bridge: %s", strerror(errno));
 										}
 									}else{
@@ -441,8 +644,8 @@ int mosquitto_main_loop(struct mosquitto_db *db, mosq_sock_t *listensock, int li
 								if(context->current_out_packet){
 									ev.events |= EPOLLOUT;
 								}
-								if(epoll_ctl(db->epollfd, EPOLL_CTL_ADD, context->sock, &ev) == -1) {
-									if((errno != EEXIST)||(epoll_ctl(db->epollfd, EPOLL_CTL_MOD, context->sock, &ev) == -1)) {
+								if(epoll_ctl(loop_args->epollfd, EPOLL_CTL_ADD, context->sock, &ev) == -1) {
+									if((errno != EEXIST)||(epoll_ctl(loop_args->epollfd, EPOLL_CTL_MOD, context->sock, &ev) == -1)) {
 											log__printf(NULL, MOSQ_LOG_DEBUG, "Error in epoll re-registering bridge: %s", strerror(errno));
 									}
 								}else{
@@ -500,7 +703,7 @@ int mosquitto_main_loop(struct mosquitto_db *db, mosq_sock_t *listensock, int li
 #ifndef WIN32
 		sigprocmask(SIG_SETMASK, &sigblock, &origsig);
 #ifdef WITH_EPOLL
-		fdcount = epoll_wait(db->epollfd, events, MAX_EVENTS, 100);
+		fdcount = epoll_wait(loop_args->epollfd, events, MAX_EVENTS, 100);
 #else
 		fdcount = poll(pollfds, pollfd_index, 100);
 #endif
@@ -512,35 +715,15 @@ int mosquitto_main_loop(struct mosquitto_db *db, mosq_sock_t *listensock, int li
 		switch(fdcount){
 		case -1:
 			if(errno != EINTR){
-				log__printf(NULL, MOSQ_LOG_ERR, "Error in epoll waiting: %s.", strerror(errno));
+				log__printf(NULL, MOSQ_LOG_ERR, "Error in epoll waiting for reading: %s.", strerror(errno));
 			}
 			break;
 		case 0:
 			break;
 		default:
 			for(i=0; i<fdcount; i++){
-				for(j=0; j<listensock_count; j++){
-					if (events[i].data.fd == listensock[j]) {
-						if (events[i].events & (EPOLLIN | EPOLLPRI)){
-							while((ev.data.fd = net__socket_accept(db, listensock[j])) != -1){
-								ev.events = EPOLLIN;
-								if (epoll_ctl(db->epollfd, EPOLL_CTL_ADD, ev.data.fd, &ev) == -1) {
-									log__printf(NULL, MOSQ_LOG_ERR, "Error in epoll accepting: %s", strerror(errno));
-								}
-								context = NULL;
-								HASH_FIND(hh_sock, db->contexts_by_sock, &(ev.data.fd), sizeof(mosq_sock_t), context);
-								if(!context) {
-									log__printf(NULL, MOSQ_LOG_ERR, "Error in epoll accepting: no context");
-								}
-								context->events = EPOLLIN;
-							}
-						}
-						break;
-					}
-				}
-				if (j == listensock_count) {
-					loop_handle_reads_writes(db, events[i].data.fd, events[i].events);
-				}
+				log__printf(NULL, MOSQ_LOG_INFO, "Thread %ld is doing the handle_read_writes", loop_args->thread_nr);
+				loop_handle_reads_writes(db, events[i].data.fd, events[i].events);
 			}
 		}
 #else
@@ -631,13 +814,7 @@ int mosquitto_main_loop(struct mosquitto_db *db, mosq_sock_t *listensock, int li
 #endif
 	}
 
-#ifdef WITH_EPOLL
-	(void) close(db->epollfd);
-	db->epollfd = 0;
-#else
-	mosquitto__free(pollfds);
-#endif
-	return MOSQ_ERR_SUCCESS;
+	pthread_exit((void*)0);
 }
 
 void do_disconnect(struct mosquitto_db *db, struct mosquitto *context, int reason)
@@ -668,10 +845,10 @@ void do_disconnect(struct mosquitto_db *db, struct mosquitto *context, int reaso
 		if(context->sock != INVALID_SOCKET){
 			HASH_DELETE(hh_sock, db->contexts_by_sock, context);
 #ifdef WITH_EPOLL
-			if (epoll_ctl(db->epollfd, EPOLL_CTL_DEL, context->sock, &ev) == -1) {
+			if (epoll_ctl(context->epollfd, EPOLL_CTL_DEL, context->sock, &ev) == -1) {
 				log__printf(NULL, MOSQ_LOG_DEBUG, "Error in epoll disconnecting websockets: %s", strerror(errno));
 			}
-#endif		
+#endif
 			context->sock = INVALID_SOCKET;
 			context->pollfd_index = -1;
 		}
@@ -718,12 +895,12 @@ void do_disconnect(struct mosquitto_db *db, struct mosquitto *context, int reaso
 			}
 		}
 #ifdef WITH_EPOLL
-		if (context->sock != INVALID_SOCKET && epoll_ctl(db->epollfd, EPOLL_CTL_DEL, context->sock, &ev) == -1) {
+		if (context->sock != INVALID_SOCKET && epoll_ctl(context->epollfd, EPOLL_CTL_DEL, context->sock, &ev) == -1) {
 			if(db->config->connection_messages == true){
 				log__printf(NULL, MOSQ_LOG_DEBUG, "Error in epoll disconnecting: %s", strerror(errno));
 			}
 		}
-#endif		
+#endif
 		context__disconnect(db, context);
 	}
 }
@@ -792,7 +969,7 @@ static void loop_handle_reads_writes(struct mosquitto_db *db, struct pollfd *pol
 #else
 #ifdef WITH_EPOLL
 		if(events & EPOLLOUT){
-#else			
+#else
 		if(pollfds[context->pollfd_index].revents & POLLOUT){
 #endif
 #endif

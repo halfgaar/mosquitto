@@ -345,6 +345,7 @@ struct mosquitto {
 #endif
 #ifdef WITH_EPOLL
 	uint32_t events;
+	int epollfd; // The epollfd that this connection context was pulled from / will be put to
 #endif
 };
 

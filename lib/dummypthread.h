@@ -1,4 +1,5 @@
 #ifndef DUMMYPTHREAD_H
+#ifndef WIEBETHREADS
 #define DUMMYPTHREAD_H
 
 #define pthread_create(A, B, C, D)
@@ -10,4 +11,5 @@
 #define pthread_mutex_lock(A) 
 #define pthread_mutex_unlock(A) 
 
+#endif
 #endif

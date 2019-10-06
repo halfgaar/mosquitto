@@ -71,7 +71,7 @@ WITH_WEBSOCKETS:=no
 WITH_EC:=yes
 
 # Build man page documentation by default.
-WITH_DOCS:=yes
+WITH_DOCS:=no
 
 # Build with client support for SOCK5 proxy.
 WITH_SOCKS:=yes
@@ -312,3 +312,5 @@ ifeq ($(WITH_COVERAGE),yes)
 	CLIENT_CFLAGS:=$(CLIENT_CFLAGS) -coverage
 	CLIENT_LDFLAGS:=$(CLIENT_LDFLAGS) -coverage
 endif
+
+BROKER_LDADD:=$(BROKER_LDADD) -lssl -lcrypto -lpthread

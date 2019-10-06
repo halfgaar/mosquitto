@@ -449,7 +449,7 @@ struct mosquitto_db{
 	int persistence_changes;
 	struct mosquitto *ll_for_free;
 #ifdef WITH_EPOLL
-	int epollfd;
+	//int epollfd;
 #endif
 };
 
