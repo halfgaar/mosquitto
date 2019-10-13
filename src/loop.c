@@ -67,6 +67,8 @@ extern bool flag_db_backup;
 extern bool flag_tree_print;
 extern int run;
 
+extern pthread_rwlock_t uthash_lock;
+
 #ifdef WITH_EPOLL
 static void loop_handle_reads_writes(struct mosquitto_db *db, mosq_sock_t sock, uint32_t events);
 #else
@@ -196,10 +198,6 @@ int mosquitto_main_loop(struct mosquitto_db *db, mosq_sock_t *listensock, int li
 	pthread_attr_init(&pt_attr);
 	pthread_attr_setdetachstate(&pt_attr, PTHREAD_CREATE_JOINABLE);
 
-	pthread_mutex_init(&db->mosquitto__subhier_mutex, NULL);
-	pthread_mutex_init(&db->mosquitto__socks_mutex, NULL);
-	pthread_mutex_init(&db->msg_store_mutex, NULL);
-
 	for (pthread_t t = 0; t < NR_OF_THREADS; t++)
 	{
 		struct read_thread_loop_args_t *args = &read_threads[t];
@@ -251,10 +249,6 @@ int mosquitto_main_loop(struct mosquitto_db *db, mosq_sock_t *listensock, int li
 		}
 
 	}
-
-	pthread_mutex_destroy(&db->mosquitto__subhier_mutex);
-	pthread_mutex_destroy(&db->mosquitto__socks_mutex);
-	pthread_mutex_destroy(&db->msg_store_mutex);
 
 #ifdef WITH_EPOLL
 	//(void) close(db->epollfd);
@@ -324,7 +318,9 @@ void *accept_loop(void *threadarg)
 								}
 
 								context = NULL;
+								pthread_rwlock_rdlock(&uthash_lock);
 								HASH_FIND(hh_sock, db->contexts_by_sock, &(ev.data.fd), sizeof(mosq_sock_t), context);
+								pthread_rwlock_unlock(&uthash_lock);
 								if(!context) {
 									log__printf(NULL, MOSQ_LOG_ERR, "Error in epoll accepting: no context");
 								}
@@ -432,6 +428,7 @@ void *read_loop_for_thread(void *threadarg)
 #endif
 
 		time_count = 0;
+		pthread_rwlock_wrlock(&uthash_lock);
 		HASH_ITER(hh_sock, db->contexts_by_sock, context, ctxt_tmp){
 			if(time_count > 0){
 				time_count--;
@@ -538,6 +535,7 @@ void *read_loop_for_thread(void *threadarg)
 				}
 			}
 		}
+		pthread_rwlock_unlock(&uthash_lock);
 
 #ifdef WITH_BRIDGE
 		time_count = 0;
@@ -676,6 +674,7 @@ void *read_loop_for_thread(void *threadarg)
 #endif
 		now = time(NULL);
 		if(db->config->persistent_client_expiration > 0 && now > expiration_check_time){
+			pthread_rwlock_rdlock(&uthash_lock);
 			HASH_ITER(hh_id, db->contexts_by_id, context, ctxt_tmp){
 				if(context->sock == INVALID_SOCKET && context->session_expiry_interval > 0 && context->session_expiry_interval != UINT32_MAX){
 					/* This is a persistent client, check to see if the
@@ -698,6 +697,7 @@ void *read_loop_for_thread(void *threadarg)
 				}
 			}
 			expiration_check_time = time(NULL) + 3600;
+			pthread_rwlock_unlock(&uthash_lock);
 		}
 
 #ifndef WIN32
@@ -923,7 +923,9 @@ static void loop_handle_reads_writes(struct mosquitto_db *db, struct pollfd *pol
 #ifdef WITH_EPOLL
 	int i;
 	context = NULL;
+	pthread_rwlock_rdlock(&uthash_lock);
 	HASH_FIND(hh_sock, db->contexts_by_sock, &sock, sizeof(mosq_sock_t), context);
+	pthread_rwlock_unlock(&uthash_lock);
 	if(!context) {
 		return;
 	}
@@ -1000,7 +1002,9 @@ static void loop_handle_reads_writes(struct mosquitto_db *db, struct pollfd *pol
 
 #ifdef WITH_EPOLL
 	context = NULL;
+	pthread_rwlock_rdlock(&uthash_lock);
 	HASH_FIND(hh_sock, db->contexts_by_sock, &sock, sizeof(mosq_sock_t), context);
+	pthread_rwlock_unlock(&uthash_lock);
 	if(!context) {
 		return;
 	}

@@ -27,9 +27,13 @@ Contributors:
 #include "time_mosq.h"
 #include "util_mosq.h"
 
+#include "pthread.h"
+
 static unsigned long max_inflight_bytes = 0;
 static int max_queued = 100;
 static unsigned long max_queued_bytes = 0;
+
+extern pthread_rwlock_t uthash_lock;
 
 /**
  * Is this context ready to take more in flight messages right now?
@@ -169,8 +173,10 @@ static void subhier_clean(struct mosquitto_db *db, struct mosquitto__subhier **s
 
 int db__close(struct mosquitto_db *db)
 {
+	pthread_rwlock_wrlock(&uthash_lock);
 	subhier_clean(db, &db->subs);
 	db__msg_store_clean(db);
+	pthread_rwlock_unlock(&uthash_lock);
 
 	return MOSQ_ERR_SUCCESS;
 }
@@ -261,7 +267,6 @@ void db__msg_store_compact(struct mosquitto_db *db)
 	}
 }
 
-
 static void db__message_remove(struct mosquitto_db *db, struct mosquitto_msg_data *msg_data, struct mosquitto_client_msg *item)
 {
 	if(!msg_data || !item){
@@ -304,19 +309,24 @@ int db__message_delete_outgoing(struct mosquitto_db *db, struct mosquitto *conte
 
 	if(!context) return MOSQ_ERR_INVAL;
 
+	pthread_rwlock_wrlock(&uthash_lock);
 	DL_FOREACH_SAFE(context->msgs_out.inflight, tail, tmp){
 		msg_index++;
 		if(tail->mid == mid){
 			if(tail->qos != qos){
+				pthread_rwlock_unlock(&uthash_lock);
 				return MOSQ_ERR_PROTOCOL;
 			}else if(qos == 2 && tail->state != expect_state){
+				pthread_rwlock_unlock(&uthash_lock);
 				return MOSQ_ERR_PROTOCOL;
 			}
 			msg_index--;
 			db__message_remove(db, &context->msgs_out, tail);
 		}
 	}
+	pthread_rwlock_unlock(&uthash_lock);
 
+	pthread_rwlock_wrlock(&uthash_lock);
 	DL_FOREACH_SAFE(context->msgs_out.queued, tail, tmp){
 		if(context->msgs_out.inflight_maximum != 0 && msg_index >= context->msgs_out.inflight_maximum){
 			break;
@@ -337,6 +347,7 @@ int db__message_delete_outgoing(struct mosquitto_db *db, struct mosquitto *conte
 		}
 		db__message_dequeue_first(context, &context->msgs_out);
 	}
+	pthread_rwlock_unlock(&uthash_lock);
 
 	return MOSQ_ERR_SUCCESS;
 }
@@ -532,6 +543,7 @@ int db__message_update_outgoing(struct mosquitto *context, uint16_t mid, enum mo
 {
 	struct mosquitto_client_msg *tail;
 
+	pthread_rwlock_rdlock(&uthash_lock);
 	DL_FOREACH(context->msgs_out.inflight, tail){
 		if(tail->mid == mid){
 			if(tail->qos != qos){
@@ -542,6 +554,7 @@ int db__message_update_outgoing(struct mosquitto *context, uint16_t mid, enum mo
 			return MOSQ_ERR_SUCCESS;
 		}
 	}
+	pthread_rwlock_unlock(&uthash_lock);
 	return MOSQ_ERR_NOT_FOUND;
 }
 
@@ -550,6 +563,7 @@ void db__messages_delete_list(struct mosquitto_db *db, struct mosquitto_client_m
 {
 	struct mosquitto_client_msg *tail, *tmp;
 
+	pthread_rwlock_wrlock(&uthash_lock);
 	DL_FOREACH_SAFE(*head, tail, tmp){
 		DL_DELETE(*head, tail);
 		db__msg_store_ref_dec(db, &tail->store);
@@ -557,6 +571,7 @@ void db__messages_delete_list(struct mosquitto_db *db, struct mosquitto_client_m
 		mosquitto__free(tail);
 	}
 	*head = NULL;
+	pthread_rwlock_unlock(&uthash_lock);
 }
 
 
@@ -724,10 +739,12 @@ int db__message_store_find(struct mosquitto *context, uint16_t mid, struct mosqu
 
 	if(!context) return MOSQ_ERR_INVAL;
 
+	pthread_rwlock_rdlock(&uthash_lock);
 	*stored = NULL;
 	DL_FOREACH(context->msgs_in.inflight, tail){
 		if(tail->store->source_mid == mid){
 			*stored = tail->store;
+			pthread_rwlock_unlock(&uthash_lock);
 			return MOSQ_ERR_SUCCESS;
 		}
 	}
@@ -735,9 +752,11 @@ int db__message_store_find(struct mosquitto *context, uint16_t mid, struct mosqu
 	DL_FOREACH(context->msgs_in.queued, tail){
 		if(tail->store->source_mid == mid){
 			*stored = tail->store;
+			pthread_rwlock_unlock(&uthash_lock);
 			return MOSQ_ERR_SUCCESS;
 		}
 	}
+	pthread_rwlock_unlock(&uthash_lock);
 
 	return 1;
 }
@@ -754,6 +773,7 @@ int db__message_reconnect_reset_outgoing(struct mosquitto_db *db, struct mosquit
 	context->msgs_out.msg_count12 = 0;
 	context->msgs_out.inflight_quota = context->msgs_out.inflight_maximum;
 
+	pthread_rwlock_wrlock(&uthash_lock);
 	DL_FOREACH_SAFE(context->msgs_out.inflight, msg, tmp){
 		context->msgs_out.msg_count++;
 		context->msgs_out.msg_bytes += msg->store->payloadlen;
@@ -779,12 +799,15 @@ int db__message_reconnect_reset_outgoing(struct mosquitto_db *db, struct mosquit
 				break;
 		}
 	}
+	pthread_rwlock_unlock(&uthash_lock);
+
 	/* Messages received when the client was disconnected are put
 	 * in the mosq_ms_queued state. If we don't change them to the
 	 * appropriate "publish" state, then the queued messages won't
 	 * get sent until the client next receives a message - and they
 	 * will be sent out of order.
 	 */
+	pthread_rwlock_wrlock(&uthash_lock);
 	DL_FOREACH_SAFE(context->msgs_out.queued, msg, tmp){
 		context->msgs_out.msg_count++;
 		context->msgs_out.msg_bytes += msg->store->payloadlen;
@@ -807,6 +830,7 @@ int db__message_reconnect_reset_outgoing(struct mosquitto_db *db, struct mosquit
 			db__message_dequeue_first(context, &context->msgs_out);
 		}
 	}
+	pthread_rwlock_unlock(&uthash_lock);
 
 	return MOSQ_ERR_SUCCESS;
 }
@@ -823,6 +847,7 @@ int db__message_reconnect_reset_incoming(struct mosquitto_db *db, struct mosquit
 	context->msgs_in.msg_count12 = 0;
 	context->msgs_in.inflight_quota = context->msgs_in.inflight_maximum;
 
+	pthread_rwlock_wrlock(&uthash_lock);
 	DL_FOREACH_SAFE(context->msgs_in.inflight, msg, tmp){
 		context->msgs_in.msg_count++;
 		context->msgs_in.msg_bytes += msg->store->payloadlen;
@@ -841,6 +866,7 @@ int db__message_reconnect_reset_incoming(struct mosquitto_db *db, struct mosquit
 			 * whatever the client has got. */
 		}
 	}
+	pthread_rwlock_unlock(&uthash_lock);
 
 	/* Messages received when the client was disconnected are put
 	 * in the mosq_ms_queued state. If we don't change them to the
@@ -848,6 +874,7 @@ int db__message_reconnect_reset_incoming(struct mosquitto_db *db, struct mosquit
 	 * get sent until the client next receives a message - and they
 	 * will be sent out of order.
 	 */
+	pthread_rwlock_wrlock(&uthash_lock);
 	DL_FOREACH_SAFE(context->msgs_in.queued, msg, tmp){
 		context->msgs_in.msg_count++;
 		context->msgs_in.msg_bytes += msg->store->payloadlen;
@@ -870,6 +897,7 @@ int db__message_reconnect_reset_incoming(struct mosquitto_db *db, struct mosquit
 			db__message_dequeue_first(context, &context->msgs_in);
 		}
 	}
+	pthread_rwlock_unlock(&uthash_lock);
 
 	return MOSQ_ERR_SUCCESS;
 }
@@ -897,10 +925,12 @@ int db__message_release_incoming(struct mosquitto_db *db, struct mosquitto *cont
 
 	if(!context) return MOSQ_ERR_INVAL;
 
+	pthread_rwlock_wrlock(&uthash_lock);
 	DL_FOREACH_SAFE(context->msgs_in.inflight, tail, tmp){
 		msg_index++;
 		if(tail->mid == mid){
 			if(tail->store->qos != 2){
+				pthread_rwlock_unlock(&uthash_lock);
 				return MOSQ_ERR_PROTOCOL;
 			}
 			topic = tail->store->topic;
@@ -920,12 +950,15 @@ int db__message_release_incoming(struct mosquitto_db *db, struct mosquitto *cont
 					db__message_remove(db, &context->msgs_in, tail);
 					deleted = true;
 				}else{
+					pthread_rwlock_unlock(&uthash_lock);
 					return 1;
 				}
 			}
 		}
 	}
+	pthread_rwlock_unlock(&uthash_lock);
 
+	pthread_rwlock_wrlock(&uthash_lock);
 	DL_FOREACH_SAFE(context->msgs_in.queued, tail, tmp){
 		if(context->msgs_in.inflight_maximum != 0 && msg_index >= context->msgs_in.inflight_maximum){
 			break;
@@ -940,6 +973,7 @@ int db__message_release_incoming(struct mosquitto_db *db, struct mosquitto *cont
 			db__message_dequeue_first(context, &context->msgs_in);
 		}
 	}
+	pthread_rwlock_unlock(&uthash_lock);
 	if(deleted){
 		return MOSQ_ERR_SUCCESS;
 	}else{
@@ -972,6 +1006,7 @@ int db__message_write(struct mosquitto_db *db, struct mosquitto *context)
 		return MOSQ_ERR_SUCCESS;
 	}
 
+	//pthread_rwlock_wrlock(&uthash_lock);
 	DL_FOREACH_SAFE(context->msgs_in.inflight, tail, tmp){
 		msg_count++;
 		expiry_interval = 0;

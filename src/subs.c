@@ -58,6 +58,10 @@ Contributors:
 
 #include "utlist.h"
 
+#include <pthread.h>
+
+extern pthread_rwlock_t uthash_lock;
+
 struct sub__token {
 	struct sub__token *next;
 	char *topic;
@@ -353,7 +357,9 @@ static int sub__add_shared(struct mosquitto_db *db, struct mosquitto *context, i
 
 	slen = strlen(sharename);
 
+	pthread_rwlock_rdlock(&uthash_lock);
 	HASH_FIND(hh, subhier->shared, sharename, slen, shared);
+	pthread_rwlock_unlock(&uthash_lock);
 	if(shared){
 		mosquitto__free(sharename);
 	}else{
@@ -364,13 +370,17 @@ static int sub__add_shared(struct mosquitto_db *db, struct mosquitto *context, i
 		}
 		shared->name = sharename;
 
+		pthread_rwlock_wrlock(&uthash_lock);
 		HASH_ADD_KEYPTR(hh, subhier->shared, shared->name, slen, shared);
+		pthread_rwlock_unlock(&uthash_lock);
 	}
 
 	rc = sub__add_leaf(context, qos, identifier, options, &shared->subs, &newleaf);
 	if(rc > 0){
 		if(shared->subs == NULL){
+			pthread_rwlock_wrlock(&uthash_lock);
 			HASH_DELETE(hh, subhier->shared, shared);
+			pthread_rwlock_rdlock(&uthash_lock);
 			mosquitto__free(shared->name);
 			mosquitto__free(shared);
 		}
@@ -461,14 +471,15 @@ static int sub__add_normal(struct mosquitto_db *db, struct mosquitto *context, i
 	}
 }
 
-
 static int sub__add_context(struct mosquitto_db *db, struct mosquitto *context, int qos, uint32_t identifier, int options, struct mosquitto__subhier *subhier, struct sub__token *tokens, char *sharename)
 {
 	struct mosquitto__subhier *branch;
 
 	/* Find leaf node */
 	while(tokens){
+		pthread_rwlock_rdlock(&uthash_lock);
 		HASH_FIND(hh, subhier->children, tokens->topic, tokens->topic_len, branch);
+		pthread_rwlock_unlock(&uthash_lock);
 		if(!branch){
 			/* Not found */
 			branch = sub__add_hier_entry(subhier, &subhier->children, tokens->topic, tokens->topic_len);
@@ -489,7 +500,6 @@ static int sub__add_context(struct mosquitto_db *db, struct mosquitto *context, 
 		return MOSQ_ERR_SUCCESS;
 	}
 }
-
 
 static int sub__remove_normal(struct mosquitto_db *db, struct mosquitto *context, struct mosquitto__subhier *subhier, uint8_t *reason)
 {
@@ -530,7 +540,9 @@ static int sub__remove_shared(struct mosquitto_db *db, struct mosquitto *context
 	struct mosquitto__subleaf *leaf;
 	int i;
 
+	pthread_rwlock_rdlock(&uthash_lock);
 	HASH_FIND(hh, subhier->shared, sharename, strlen(sharename), shared);
+	pthread_rwlock_unlock(&uthash_lock);
 	mosquitto__free(sharename);
 	if(shared){
 		leaf = shared->subs;
@@ -539,7 +551,9 @@ static int sub__remove_shared(struct mosquitto_db *db, struct mosquitto *context
 #ifdef WITH_SYS_TREE
 				db->shared_subscription_count--;
 #endif
+				pthread_rwlock_wrlock(&uthash_lock);
 				DL_DELETE(shared->subs, leaf);
+				pthread_rwlock_unlock(&uthash_lock);
 				mosquitto__free(leaf);
 
 				/* Remove the reference to the sub that the client is keeping.
@@ -558,7 +572,9 @@ static int sub__remove_shared(struct mosquitto_db *db, struct mosquitto *context
 				}
 
 				if(shared->subs == NULL){
+					pthread_rwlock_wrlock(&uthash_lock);
 					HASH_DELETE(hh, subhier->shared, shared);
+					pthread_rwlock_unlock(&uthash_lock);
 					mosquitto__free(shared->name);
 					mosquitto__free(shared);
 				}
@@ -587,11 +603,15 @@ static int sub__remove_recurse(struct mosquitto_db *db, struct mosquitto *contex
 		}
 	}
 
+	pthread_rwlock_rdlock(&uthash_lock);
 	HASH_FIND(hh, subhier->children, tokens->topic, tokens->topic_len, branch);
+	pthread_rwlock_unlock(&uthash_lock);
 	if(branch){
 		sub__remove_recurse(db, context, branch, tokens->next, reason, sharename);
 		if(!branch->children && !branch->subs && !branch->retained && !branch->shared){
+			pthread_rwlock_wrlock(&uthash_lock);
 			HASH_DELETE(hh, subhier->children, branch);
+			pthread_rwlock_unlock(&uthash_lock);
 			mosquitto__free(branch->topic);
 			mosquitto__free(branch);
 		}
@@ -608,7 +628,9 @@ static int sub__search(struct mosquitto_db *db, struct mosquitto__subhier *subhi
 
 	if(tokens){
 		/* Check for literal match */
+		pthread_rwlock_rdlock(&uthash_lock);
 		HASH_FIND(hh, subhier->children, tokens->topic, tokens->topic_len, branch);
+		pthread_rwlock_unlock(&uthash_lock);
 
 		if(branch){
 			rc = sub__search(db, branch, tokens->next, source_id, topic, qos, retain, stored, set_retain);
@@ -628,7 +650,9 @@ static int sub__search(struct mosquitto_db *db, struct mosquitto__subhier *subhi
 		}
 
 		/* Check for + match */
+		pthread_rwlock_rdlock(&uthash_lock);
 		HASH_FIND(hh, subhier->children, "+", 1, branch);
+		pthread_rwlock_unlock(&uthash_lock);
 
 		if(branch){
 			rc = sub__search(db, branch, tokens->next, source_id, topic, qos, retain, stored, false);
@@ -649,7 +673,9 @@ static int sub__search(struct mosquitto_db *db, struct mosquitto__subhier *subhi
 	}
 
 	/* Check for # match */
+	pthread_rwlock_rdlock(&uthash_lock);
 	HASH_FIND(hh, subhier->children, "#", 1, branch);
+	pthread_rwlock_unlock(&uthash_lock);
 	if(branch && !branch->children){
 		/* The topic matches due to a # wildcard - process the
 		 * subscriptions but *don't* return. Although this branch has ended
@@ -694,7 +720,9 @@ struct mosquitto__subhier *sub__add_hier_entry(struct mosquitto__subhier *parent
 		strncpy(child->topic, topic, child->topic_len+1);
 	}
 
+	pthread_rwlock_wrlock(&uthash_lock);
 	HASH_ADD_KEYPTR(hh, *sibling, child->topic, child->topic_len, child);
+	pthread_rwlock_unlock(&uthash_lock);
 
 	return child;
 }
@@ -734,7 +762,9 @@ int sub__add(struct mosquitto_db *db, struct mosquitto *context, const char *sub
 		tokens->topic_len = 0;
 	}
 
+	pthread_rwlock_rdlock(&uthash_lock);
 	HASH_FIND(hh, *root, tokens->topic, tokens->topic_len, subhier);
+	pthread_rwlock_unlock(&uthash_lock);
 	if(!subhier){
 		subhier = sub__add_hier_entry(NULL, root, tokens->topic, tokens->topic_len);
 		if(!subhier){
@@ -784,7 +814,9 @@ int sub__remove(struct mosquitto_db *db, struct mosquitto *context, const char *
 		tokens->topic_len = 0;
 	}
 
+	pthread_rwlock_rdlock(&uthash_lock);
 	HASH_FIND(hh, root, tokens->topic, tokens->topic_len, subhier);
+	pthread_rwlock_unlock(&uthash_lock);
 	if(subhier){
 		*reason = MQTT_RC_NO_SUBSCRIPTION_EXISTED;
 		rc = sub__remove_recurse(db, context, subhier, tokens, reason, sharename);
@@ -812,7 +844,9 @@ int sub__messages_queue(struct mosquitto_db *db, const char *source_id, const ch
 	*/
 	db__msg_store_ref_inc(*stored);
 
+	pthread_rwlock_rdlock(&uthash_lock);
 	HASH_FIND(hh, db->subs, tokens->topic, tokens->topic_len, subhier);
+	pthread_rwlock_unlock(&uthash_lock);
 	if(subhier){
 		if(retain){
 			/* We have a message that needs to be retained, so ensure that the subscription
@@ -845,7 +879,9 @@ static struct mosquitto__subhier *tmp_remove_subs(struct mosquitto__subhier *sub
 	}
 
 	parent = sub->parent;
+	pthread_rwlock_wrlock(&uthash_lock);
 	HASH_DELETE(hh, parent->children, sub);
+	pthread_rwlock_unlock(&uthash_lock);
 	mosquitto__free(sub->topic);
 	mosquitto__free(sub);
 
@@ -922,7 +958,9 @@ int sub__clean_session(struct mosquitto_db *db, struct mosquitto *context)
 #ifdef WITH_SYS_TREE
 				db->subscription_count--;
 #endif
+				pthread_rwlock_wrlock(&uthash_lock);
 				DL_DELETE(context->subs[i]->subs, leaf);
+				pthread_rwlock_unlock(&uthash_lock);
 				mosquitto__free(leaf);
 				break;
 			}
@@ -954,6 +992,7 @@ void sub__tree_print(struct mosquitto__subhier *root, int level)
 	struct mosquitto__subhier *branch, *branch_tmp;
 	struct mosquitto__subleaf *leaf;
 
+	pthread_rwlock_rdlock(&uthash_lock);
 	HASH_ITER(hh, root, branch, branch_tmp){
 	if(level > -1){
 		for(i=0; i<(level+2)*2; i++){
@@ -977,6 +1016,7 @@ void sub__tree_print(struct mosquitto__subhier *root, int level)
 
 		sub__tree_print(branch->children, level+1);
 	}
+	pthread_rwlock_unlock(&uthash_lock);
 }
 
 static int retain__process(struct mosquitto_db *db, struct mosquitto__subhier *branch, struct mosquitto *context, int sub_qos, uint32_t subscription_identifier, time_t now)
@@ -1050,6 +1090,7 @@ static int retain__search(struct mosquitto_db *db, struct mosquitto__subhier *su
 	int flag = 0;
 
 	if(!strcmp(tokens->topic, "#") && !tokens->next){
+		pthread_rwlock_rdlock(&uthash_lock);
 		HASH_ITER(hh, subhier->children, branch, branch_tmp){
 			/* Set flag to indicate that we should check for retained messages
 			 * on "foo" when we are subscribing to e.g. "foo/#" and then exit
@@ -1063,8 +1104,10 @@ static int retain__search(struct mosquitto_db *db, struct mosquitto__subhier *su
 				retain__search(db, branch, tokens, context, sub, sub_qos, subscription_identifier, now, level+1);
 			}
 		}
+		pthread_rwlock_unlock(&uthash_lock);
 	}else{
 		if(!strcmp(tokens->topic, "+")){
+			pthread_rwlock_rdlock(&uthash_lock);
 			HASH_ITER(hh, subhier->children, branch, branch_tmp){
 				if(tokens->next){
 					if(retain__search(db, branch, tokens->next, context, sub, sub_qos, subscription_identifier, now, level+1) == -1
@@ -1080,8 +1123,11 @@ static int retain__search(struct mosquitto_db *db, struct mosquitto__subhier *su
 					}
 				}
 			}
+			pthread_rwlock_unlock(&uthash_lock);
 		}else{
+			pthread_rwlock_rdlock(&uthash_lock);
 			HASH_FIND(hh, subhier->children, tokens->topic, tokens->topic_len, branch);
+			pthread_rwlock_unlock(&uthash_lock);
 			if(branch){
 				if(tokens->next){
 					if(retain__search(db, branch, tokens->next, context, sub, sub_qos, subscription_identifier, now, level+1) == -1
@@ -1114,7 +1160,9 @@ int sub__retain_queue(struct mosquitto_db *db, struct mosquitto *context, const 
 
 	if(sub__topic_tokenise(sub, &tokens)) return 1;
 
+	pthread_rwlock_rdlock(&uthash_lock);
 	HASH_FIND(hh, db->subs, tokens->topic, tokens->topic_len, subhier);
+	pthread_rwlock_unlock(&uthash_lock);
 
 	if(subhier){
 		now = time(NULL);

@@ -257,7 +257,7 @@ struct mosquitto {
 #endif
 	bool want_write;
 	bool want_connect;
-#if defined(WITH_THREADING) && !defined(WITH_BROKER)
+//#if defined(WITH_THREADING) && !defined(WITH_BROKER) --- I have to comment this in because I had to remove the dummy pthread stuff
 	pthread_mutex_t callback_mutex;
 	pthread_mutex_t log_callback_mutex;
 	pthread_mutex_t msgtime_mutex;
@@ -266,7 +266,7 @@ struct mosquitto {
 	pthread_mutex_t state_mutex;
 	pthread_mutex_t mid_mutex;
 	pthread_t thread_id;
-#endif
+//#endif
 	bool clean_start;
 	uint32_t session_expiry_interval;
 	time_t session_expiry_time;

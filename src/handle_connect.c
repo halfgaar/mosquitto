@@ -36,6 +36,8 @@ Contributors:
 #  include <libwebsockets.h>
 #endif
 
+extern pthread_rwlock_t uthash_lock;
+
 
 static char nibble_to_hex(uint8_t value)
 {
@@ -85,6 +87,7 @@ void connection_check_acl(struct mosquitto_db *db, struct mosquitto *context, st
 {
 	struct mosquitto_client_msg *msg_tail, *tmp;
 
+	pthread_rwlock_wrlock(&uthash_lock);
 	DL_FOREACH_SAFE((*head), msg_tail, tmp){
 		if(msg_tail->direction == mosq_md_out){
 			if(mosquitto_acl_check(db, context, msg_tail->store->topic,
@@ -98,6 +101,7 @@ void connection_check_acl(struct mosquitto_db *db, struct mosquitto *context, st
 			}
 		}
 	}
+	pthread_rwlock_unlock(&uthash_lock);
 }
 
 
@@ -111,7 +115,9 @@ int connect__on_authorised(struct mosquitto_db *db, struct mosquitto *context, v
 	int rc;
 
 	/* Find if this client already has an entry. This must be done *after* any security checks. */
+	pthread_rwlock_rdlock(&uthash_lock);
 	HASH_FIND(hh_id, db->contexts_by_id, context->id, strlen(context->id), found_context);
+	pthread_rwlock_unlock(&uthash_lock);
 	if(found_context){
 		/* Found a matching client */
 		if(found_context->sock == INVALID_SOCKET){
@@ -215,7 +221,9 @@ int connect__on_authorised(struct mosquitto_db *db, struct mosquitto *context, v
 	connection_check_acl(db, context, &context->msgs_out.inflight);
 	connection_check_acl(db, context, &context->msgs_out.queued);
 
+	pthread_rwlock_wrlock(&uthash_lock);
 	HASH_ADD_KEYPTR(hh_id, db->contexts_by_id, context->id, strlen(context->id), context);
+	pthread_rwlock_unlock(&uthash_lock);
 
 #ifdef WITH_PERSISTENCE
 	if(!context->clean_start){

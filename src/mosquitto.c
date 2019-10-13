@@ -49,9 +49,16 @@ Contributors:
 #  include <libwebsockets.h>
 #endif
 
+
+
+
 #include "mosquitto_broker_internal.h"
 #include "memory_mosq.h"
 #include "util_mosq.h"
+
+// TODO: one per struct that has a UT hash handle?
+pthread_rwlock_t uthash_lock;
+//pthread_mutex_t mem_mutex;
 
 struct mosquitto_db int_db;
 
@@ -241,6 +248,9 @@ int main(int argc, char *argv[])
 #endif
 
 	memset(&int_db, 0, sizeof(struct mosquitto_db));
+
+	pthread_rwlock_init(&uthash_lock,NULL);
+	pthread_mutex_init(&mem_mutex, NULL);
 
 	net__broker_init();
 
@@ -438,6 +448,9 @@ int main(int argc, char *argv[])
 	log__close(&config);
 	config__cleanup(int_db.config);
 	net__broker_cleanup();
+
+	pthread_rwlock_destroy(&uthash_lock);
+	pthread_mutex_destroy(&mem_mutex);
 
 	return rc;
 }

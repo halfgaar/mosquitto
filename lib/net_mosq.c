@@ -74,6 +74,8 @@ Contributors:
 int tls_ex_index_mosq = -1;
 UI_METHOD *_ui_method = NULL;
 
+extern pthread_rwlock_t uthash_lock;
+
 /* Functions taken from OpenSSL s_server/s_client */
 static int ui_open(UI *ui)
 {
@@ -218,7 +220,9 @@ int net__socket_close(struct mosquitto *mosq)
 	{
 		if(mosq->sock != INVALID_SOCKET){
 #ifdef WITH_BROKER
+			pthread_rwlock_wrlock(&uthash_lock);
 			HASH_DELETE(hh_sock, db->contexts_by_sock, mosq);
+			pthread_rwlock_unlock(&uthash_lock);
 #endif
 			rc = COMPAT_CLOSE(mosq->sock);
 			mosq->sock = INVALID_SOCKET;

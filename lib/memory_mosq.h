@@ -38,4 +38,6 @@ char *mosquitto__strdup(const char *s);
 void memory__set_limit(size_t lim);
 #endif
 
+pthread_mutex_t mem_mutex;
+
 #endif

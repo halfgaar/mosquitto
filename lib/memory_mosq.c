@@ -21,6 +21,8 @@ Contributors:
 
 #include "memory_mosq.h"
 
+#include <pthread.h>
+
 #ifdef REAL_WITH_MEMORY_TRACKING
 #  if defined(__APPLE__)
 #    include <malloc/malloc.h>
@@ -41,14 +43,18 @@ static unsigned long max_memcount = 0;
 static size_t mem_limit = 0;
 void memory__set_limit(size_t lim)
 {
+	pthread_mutex_lock(&mem_mutex);
 	mem_limit = lim;
+	pthread_mutex_unlock(&mem_mutex);
 }
 #endif
 
 void *mosquitto__calloc(size_t nmemb, size_t size)
 {
+	pthread_mutex_lock(&mem_mutex);
 #ifdef REAL_WITH_MEMORY_TRACKING
 	if(mem_limit && memcount + size > mem_limit){
+		pthread_mutex_unlock(&mem_mutex);
 		return NULL;
 	}
 #endif
@@ -63,24 +69,31 @@ void *mosquitto__calloc(size_t nmemb, size_t size)
 	}
 #endif
 
+	pthread_mutex_unlock(&mem_mutex);
 	return mem;
 }
 
 void mosquitto__free(void *mem)
 {
+	pthread_mutex_lock(&mem_mutex);
 #ifdef REAL_WITH_MEMORY_TRACKING
 	if(!mem){
+		pthread_mutex_unlock(&mem_mutex);
 		return;
 	}
 	memcount -= malloc_usable_size(mem);
 #endif
 	free(mem);
+	pthread_mutex_unlock(&mem_mutex);
 }
 
 void *mosquitto__malloc(size_t size)
 {
+	pthread_mutex_lock(&mem_mutex);
+
 #ifdef REAL_WITH_MEMORY_TRACKING
 	if(mem_limit && memcount + size > mem_limit){
+		pthread_mutex_unlock(&mem_mutex);
 		return NULL;
 	}
 #endif
@@ -95,6 +108,7 @@ void *mosquitto__malloc(size_t size)
 	}
 #endif
 
+	pthread_mutex_unlock(&mem_mutex);
 	return mem;
 }
 
@@ -112,8 +126,11 @@ unsigned long mosquitto__max_memory_used(void)
 
 void *mosquitto__realloc(void *ptr, size_t size)
 {
+	pthread_mutex_lock(&mem_mutex);
+
 #ifdef REAL_WITH_MEMORY_TRACKING
 	if(mem_limit && memcount + size > mem_limit){
+		pthread_mutex_unlock(&mem_mutex);
 		return NULL;
 	}
 #endif
@@ -134,13 +151,17 @@ void *mosquitto__realloc(void *ptr, size_t size)
 	}
 #endif
 
+	pthread_mutex_unlock(&mem_mutex);
 	return mem;
 }
 
 char *mosquitto__strdup(const char *s)
 {
+	pthread_mutex_lock(&mem_mutex);
+
 #ifdef REAL_WITH_MEMORY_TRACKING
 	if(mem_limit && memcount + strlen(s) > mem_limit){
+		pthread_mutex_unlock(&mem_mutex);
 		return NULL;
 	}
 #endif
@@ -155,6 +176,7 @@ char *mosquitto__strdup(const char *s)
 	}
 #endif
 
+	pthread_mutex_unlock(&mem_mutex);
 	return str;
 }
 
