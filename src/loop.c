@@ -119,7 +119,7 @@ int mosquitto_main_loop(struct mosquitto_db *db, mosq_sock_t *listensock, int li
 #endif
 	time_t now = 0;
 	int time_count;
-	int keep_alive_check_count = 0;
+	time_t last_keep_alive_time = 0;
 	int fdcount;
 	struct mosquitto *context, *ctxt_tmp;
 #ifndef WIN32
@@ -362,9 +362,12 @@ int mosquitto_main_loop(struct mosquitto_db *db, mosq_sock_t *listensock, int li
 #endif
 
 		// Loop over all contexts and check their keep-alive/validity
-		if (keep_alive_check_count++ > 50)
+		now = mosquitto_time();
+		if (now - last_keep_alive_time > 2)
 		{
-			keep_alive_check_count = 0;
+			log__printf(NULL, MOSQ_LOG_INFO, "Doing keep-alives");
+			last_keep_alive_time = now;
+
 			time_count = 0;
 			HASH_ITER(hh_sock, db->contexts_by_sock, context, ctxt_tmp){
 				if(time_count > 0){
