@@ -52,6 +52,7 @@ struct mosquitto *context__init(struct mosquitto_db *db, mosq_sock_t sock)
 	context->password = NULL;
 	context->listener = NULL;
 	context->acl_list = NULL;
+	context->pending_next = NULL;
 
 	/* is_bridge records whether this client is a bridge or not. This could be
 	 * done by looking at context->bridge for bridges that we create ourself,
@@ -307,5 +308,11 @@ void context__remove_from_by_id(struct mosquitto_db *db, struct mosquitto *conte
 		HASH_DELETE(hh_id, db->contexts_by_id, context);
 		context->removed_from_by_id = true;
 	}
+}
+
+void context__add_to_pending(struct mosquitto_db *db, struct mosquitto *context)
+{
+	context->pending_next = db->ll_pending_contexts;
+	db->ll_pending_contexts = context;
 }
 

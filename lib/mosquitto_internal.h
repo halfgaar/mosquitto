@@ -339,6 +339,7 @@ struct mosquitto {
 #ifdef WITH_BROKER
 	UT_hash_handle hh_id;
 	UT_hash_handle hh_sock;
+	struct mosquitto *pending_next;
 	struct mosquitto *for_free_next;
 	struct session_expiry_list *expiry_list_item;
 #endif

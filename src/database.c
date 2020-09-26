@@ -121,6 +121,7 @@ int db__open(struct mosquitto__config *config, struct mosquitto_db *db)
 	db->contexts_by_id = NULL;
 	db->contexts_by_sock = NULL;
 	db->contexts_for_free = NULL;
+	db->ll_pending_contexts = NULL;
 #ifdef WITH_BRIDGE
 	db->bridges = NULL;
 	db->bridge_count = 0;
@@ -358,6 +359,8 @@ int db__message_insert(struct mosquitto_db *db, struct mosquitto *context, uint1
 	assert(stored);
 	if(!context) return MOSQ_ERR_INVAL;
 	if(!context->id) return MOSQ_ERR_SUCCESS; /* Protect against unlikely "client is disconnected but not entirely freed" scenario */
+
+	context__add_to_pending(db, context);
 
 	if(dir == mosq_md_out){
 		msg_data = &context->msgs_out;
