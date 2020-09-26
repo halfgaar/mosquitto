@@ -121,6 +121,7 @@ int db__open(struct mosquitto__config *config, struct mosquitto_db *db)
 	db->contexts_by_id = NULL;
 	db->contexts_by_sock = NULL;
 	db->contexts_for_free = NULL;
+	db->ll_pending_contexts = NULL;
 #ifdef WITH_BRIDGE
 	db->bridges = NULL;
 	db->bridge_count = 0;
@@ -306,6 +307,8 @@ int db__message_delete_outgoing(struct mosquitto_db *db, struct mosquitto *conte
 
 	if(!context) return MOSQ_ERR_INVAL;
 
+	context__add_to_pending(db, context);
+
 	DL_FOREACH_SAFE(context->msgs_out.inflight, tail, tmp){
 		msg_index++;
 		if(tail->mid == mid){
@@ -358,6 +361,8 @@ int db__message_insert(struct mosquitto_db *db, struct mosquitto *context, uint1
 	assert(stored);
 	if(!context) return MOSQ_ERR_INVAL;
 	if(!context->id) return MOSQ_ERR_SUCCESS; /* Protect against unlikely "client is disconnected but not entirely freed" scenario */
+
+	context__add_to_pending(db, context);
 
 	if(dir == mosq_md_out){
 		msg_data = &context->msgs_out;
@@ -573,6 +578,8 @@ int db__messages_delete(struct mosquitto_db *db, struct mosquitto *context)
 {
 	if(!context) return MOSQ_ERR_INVAL;
 
+	context__add_to_pending(db, context);
+
 	db__messages_delete_list(db, &context->msgs_in.inflight);
 	db__messages_delete_list(db, &context->msgs_in.queued);
 	db__messages_delete_list(db, &context->msgs_out.inflight);
@@ -601,6 +608,8 @@ int db__messages_easy_queue(struct mosquitto_db *db, struct mosquitto *context, 
 	enum mosquitto_msg_origin origin;
 
 	assert(db);
+
+	context__add_to_pending(db, context);
 
 	payload_uhpa.ptr = NULL;
 
@@ -757,6 +766,8 @@ int db__message_reconnect_reset_outgoing(struct mosquitto_db *db, struct mosquit
 {
 	struct mosquitto_client_msg *msg, *tmp;
 
+	context__add_to_pending(db, context);
+
 	context->msgs_out.msg_bytes = 0;
 	context->msgs_out.msg_bytes12 = 0;
 	context->msgs_out.msg_count = 0;
@@ -825,6 +836,8 @@ int db__message_reconnect_reset_outgoing(struct mosquitto_db *db, struct mosquit
 int db__message_reconnect_reset_incoming(struct mosquitto_db *db, struct mosquitto *context)
 {
 	struct mosquitto_client_msg *msg, *tmp;
+
+	context__add_to_pending(db, context);
 
 	context->msgs_in.msg_bytes = 0;
 	context->msgs_in.msg_bytes12 = 0;
@@ -906,6 +919,8 @@ int db__message_release_incoming(struct mosquitto_db *db, struct mosquitto *cont
 
 	if(!context) return MOSQ_ERR_INVAL;
 
+	context__add_to_pending(db, context);
+
 	DL_FOREACH_SAFE(context->msgs_in.inflight, tail, tmp){
 		msg_index++;
 		if(tail->mid == mid){
@@ -980,6 +995,8 @@ int db__message_write(struct mosquitto_db *db, struct mosquitto *context)
 	if(context->state != mosq_cs_active){
 		return MOSQ_ERR_SUCCESS;
 	}
+
+	context__add_to_pending(db, context);
 
 	DL_FOREACH_SAFE(context->msgs_in.inflight, tail, tmp){
 		msg_count++;

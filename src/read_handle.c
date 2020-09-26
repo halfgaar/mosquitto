@@ -34,6 +34,8 @@ int handle__packet(struct mosquitto_db *db, struct mosquitto *context)
 {
 	if(!context) return MOSQ_ERR_INVAL;
 
+	context__add_to_pending(db, context);
+
 	switch((context->in_packet.command)&0xF0){
 		case CMD_PINGREQ:
 			return handle__pingreq(context);
