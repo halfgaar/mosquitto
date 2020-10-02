@@ -340,6 +340,7 @@ struct mosquitto {
 	UT_hash_handle hh_id;
 	UT_hash_handle hh_sock;
 	struct mosquitto *pending_next;
+	bool pending; // A pending context is one that needs processing by the event loop.
 	struct mosquitto *for_free_next;
 	struct session_expiry_list *expiry_list_item;
 #endif

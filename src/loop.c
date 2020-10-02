@@ -482,6 +482,7 @@ int mosquitto_main_loop(struct mosquitto_db *db, mosq_sock_t *listensock, int li
 				}
 			}
 
+			context->pending = false;
 			context = ctxt_tmp;
 		}
 		db->ll_pending_contexts = NULL;

@@ -53,6 +53,7 @@ struct mosquitto *context__init(struct mosquitto_db *db, mosq_sock_t sock)
 	context->listener = NULL;
 	context->acl_list = NULL;
 	context->pending_next = NULL;
+	context->pending = false;
 
 	/* is_bridge records whether this client is a bridge or not. This could be
 	 * done by looking at context->bridge for bridges that we create ourself,
@@ -310,20 +311,16 @@ void context__remove_from_by_id(struct mosquitto_db *db, struct mosquitto *conte
 	}
 }
 
+// 'Pending' contexts are those that require processing by the main event loop
 void context__add_to_pending(struct mosquitto_db *db, struct mosquitto *context)
 {
 	if (!context)
 		return;
 
-	struct mosquitto *cur_context = db->ll_pending_contexts;
-	while (cur_context != NULL)
-	{
-		if (cur_context == context)
-			return;
+	if (context->pending)
+		return;
 
-		cur_context = cur_context->pending_next;
-	}
-
+	context->pending = true;
 	context->pending_next = db->ll_pending_contexts;
 	db->ll_pending_contexts = context;
 }
