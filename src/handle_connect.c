@@ -110,6 +110,8 @@ int connect__on_authorised(struct mosquitto_db *db, struct mosquitto *context, v
 	int i;
 	int rc;
 
+	context__add_to_pending(db, context);
+
 	/* Find if this client already has an entry. This must be done *after* any security checks. */
 	HASH_FIND(hh_id, db->contexts_by_id, context->id, strlen(context->id), found_context);
 	if(found_context){
@@ -396,6 +398,8 @@ int handle__connect(struct mosquitto_db *db, struct mosquitto *context)
 	if(!context->listener){
 		return MOSQ_ERR_INVAL;
 	}
+
+	context__add_to_pending(db, context);
 
 	/* Don't accept multiple CONNECT commands. */
 	if(context->state != mosq_cs_new){

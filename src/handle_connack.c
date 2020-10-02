@@ -41,6 +41,7 @@ int handle__connack(struct mosquitto_db *db, struct mosquitto *context)
 		return MOSQ_ERR_INVAL;
 	}
 	log__printf(NULL, MOSQ_LOG_DEBUG, "Received CONNACK on connection %s.", context->id);
+	context__add_to_pending(db, context);
 	if(packet__read_byte(&context->in_packet, &connect_acknowledge)) return 1;
 	if(packet__read_byte(&context->in_packet, &reason_code)) return 1;
 

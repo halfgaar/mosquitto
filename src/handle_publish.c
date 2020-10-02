@@ -65,6 +65,8 @@ int handle__publish(struct mosquitto_db *db, struct mosquitto *context)
 		return MOSQ_ERR_PROTOCOL;
 	}
 
+	context__add_to_pending(db, context);
+
 	payload.ptr = NULL;
 
 	dup = (header & 0x08)>>3;

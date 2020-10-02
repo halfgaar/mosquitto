@@ -42,6 +42,8 @@ int handle__auth(struct mosquitto_db *db, struct mosquitto *context)
 
 	if(!context) return MOSQ_ERR_INVAL;
 
+	context__add_to_pending(db, context);
+
 	if(context->protocol != mosq_p_mqtt5 || context->auth_method == NULL){
 		return MOSQ_ERR_PROTOCOL;
 	}

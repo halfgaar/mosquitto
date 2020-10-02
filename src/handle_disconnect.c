@@ -31,6 +31,8 @@ int handle__disconnect(struct mosquitto_db *db, struct mosquitto *context)
 	uint8_t reason_code = 0;
 	mosquitto_property *properties = NULL;
 
+	context__add_to_pending(db, context);
+
 	if(!context){
 		return MOSQ_ERR_INVAL;
 	}

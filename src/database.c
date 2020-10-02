@@ -307,6 +307,8 @@ int db__message_delete_outgoing(struct mosquitto_db *db, struct mosquitto *conte
 
 	if(!context) return MOSQ_ERR_INVAL;
 
+	context__add_to_pending(db, context);
+
 	DL_FOREACH_SAFE(context->msgs_out.inflight, tail, tmp){
 		msg_index++;
 		if(tail->mid == mid){
@@ -576,6 +578,8 @@ int db__messages_delete(struct mosquitto_db *db, struct mosquitto *context)
 {
 	if(!context) return MOSQ_ERR_INVAL;
 
+	context__add_to_pending(db, context);
+
 	db__messages_delete_list(db, &context->msgs_in.inflight);
 	db__messages_delete_list(db, &context->msgs_in.queued);
 	db__messages_delete_list(db, &context->msgs_out.inflight);
@@ -604,6 +608,8 @@ int db__messages_easy_queue(struct mosquitto_db *db, struct mosquitto *context, 
 	enum mosquitto_msg_origin origin;
 
 	assert(db);
+
+	context__add_to_pending(db, context);
 
 	payload_uhpa.ptr = NULL;
 
@@ -760,6 +766,8 @@ int db__message_reconnect_reset_outgoing(struct mosquitto_db *db, struct mosquit
 {
 	struct mosquitto_client_msg *msg, *tmp;
 
+	context__add_to_pending(db, context);
+
 	context->msgs_out.msg_bytes = 0;
 	context->msgs_out.msg_bytes12 = 0;
 	context->msgs_out.msg_count = 0;
@@ -828,6 +836,8 @@ int db__message_reconnect_reset_outgoing(struct mosquitto_db *db, struct mosquit
 int db__message_reconnect_reset_incoming(struct mosquitto_db *db, struct mosquitto *context)
 {
 	struct mosquitto_client_msg *msg, *tmp;
+
+	context__add_to_pending(db, context);
 
 	context->msgs_in.msg_bytes = 0;
 	context->msgs_in.msg_bytes12 = 0;
@@ -909,6 +919,8 @@ int db__message_release_incoming(struct mosquitto_db *db, struct mosquitto *cont
 
 	if(!context) return MOSQ_ERR_INVAL;
 
+	context__add_to_pending(db, context);
+
 	DL_FOREACH_SAFE(context->msgs_in.inflight, tail, tmp){
 		msg_index++;
 		if(tail->mid == mid){
@@ -983,6 +995,8 @@ int db__message_write(struct mosquitto_db *db, struct mosquitto *context)
 	if(context->state != mosq_cs_active){
 		return MOSQ_ERR_SUCCESS;
 	}
+
+	context__add_to_pending(db, context);
 
 	DL_FOREACH_SAFE(context->msgs_in.inflight, tail, tmp){
 		msg_count++;
